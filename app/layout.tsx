@@ -1,10 +1,10 @@
-import { ClerkProvider } from '@clerk/nextjs';
+import { ClerkProvider } from "@clerk/nextjs";
 import "./globals.css";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Next.js Premium Startup Boilerplate",
-  description: "Created using the ultimate interactive Next.js stack generator CLI.",
+  title: "Accio AI Workspace",
+  description: "A cozy productivity dashboard for notes, boards, tasks, and AI-assisted planning.",
 };
 
 export default function RootLayout({

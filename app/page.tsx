@@ -1,6 +1,14 @@
 import React from 'react';
+import { auth } from "@clerk/nextjs/server";
+import { syncCurrentUserByEmail } from "@/lib/sync-user";
 
-export default function Home() {
+export default async function Home() {
+  const { userId } = await auth();
+
+  if (userId) {
+    await syncCurrentUserByEmail();
+  }
+
   return (
     <main style={styles.container}>
       <div style={styles.hero}>

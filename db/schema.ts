@@ -1,6 +1,8 @@
 import {
+  boolean,
   date,
   integer,
+  jsonb,
   pgEnum,
   pgTable,
   serial,
@@ -63,7 +65,70 @@ export const calendarItems = pgTable("calendar_items", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+export const kanbanTaskPriority = pgEnum("kanban_task_priority", [
+  "low",
+  "medium",
+  "high",
+]);
+
+export const kanbanBoards = pgTable("kanban_boards", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  color: text("color").notNull().default("#ef6f61"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const kanbanColumns = pgTable("kanban_columns", {
+  id: serial("id").primaryKey(),
+  boardId: integer("board_id")
+    .notNull()
+    .references(() => kanbanBoards.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  color: text("color").notNull().default("#10a37f"),
+  position: integer("position").notNull().default(0),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const kanbanTasks = pgTable("kanban_tasks", {
+  id: serial("id").primaryKey(),
+  boardId: integer("board_id")
+    .notNull()
+    .references(() => kanbanBoards.id, { onDelete: "cascade" }),
+  columnId: integer("column_id")
+    .notNull()
+    .references(() => kanbanColumns.id, { onDelete: "cascade" }),
+  linkedCalendarItemId: integer("linked_calendar_item_id").references(
+    () => calendarItems.id,
+    { onDelete: "set null" }
+  ),
+  title: text("title").notNull(),
+  description: text("description"),
+  dueDate: date("due_date"),
+  priority: kanbanTaskPriority("priority").notNull().default("medium"),
+  labels: jsonb("labels")
+    .$type<Array<{ name: string; color: string }>>()
+    .notNull()
+    .default([]),
+  position: integer("position").notNull().default(0),
+  syncCalendar: boolean("sync_calendar").notNull().default(false),
+  syncNotes: boolean("sync_notes").notNull().default(false),
+  syncAi: boolean("sync_ai").notNull().default(false),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 export type CalendarItem = typeof calendarItems.$inferSelect;
 export type NewCalendarItem = typeof calendarItems.$inferInsert;
+export type KanbanBoard = typeof kanbanBoards.$inferSelect;
+export type NewKanbanBoard = typeof kanbanBoards.$inferInsert;
+export type KanbanColumn = typeof kanbanColumns.$inferSelect;
+export type NewKanbanColumn = typeof kanbanColumns.$inferInsert;
+export type KanbanTask = typeof kanbanTasks.$inferSelect;
+export type NewKanbanTask = typeof kanbanTasks.$inferInsert;

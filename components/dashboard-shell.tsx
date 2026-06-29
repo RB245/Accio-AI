@@ -28,7 +28,7 @@ import * as React from "react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
-type ActivePage = "dashboard" | "calendar"
+type ActivePage = "dashboard" | "calendar" | "kanban"
 
 type DashboardShellProps = {
   activePage?: ActivePage
@@ -42,7 +42,7 @@ const navItems = [
       { name: "Dashboard", href: "/", icon: Home, color: "text-[#ef6f61]", page: "dashboard" },
       { name: "AI Assistant", href: "#", icon: Bot, color: "text-[#7c5cff]" },
       { name: "Calendar", href: "/calendar", icon: CalendarDays, color: "text-[#10a37f]", page: "calendar" },
-      { name: "Task / Kanban", href: "#", icon: Grid3X3, color: "text-[#f59e0b]" },
+      { name: "Task / Kanban", href: "/kanban", icon: Grid3X3, color: "text-[#f59e0b]", page: "kanban" },
     ],
   },
   {

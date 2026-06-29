@@ -301,84 +301,95 @@ export function CalendarPage({ initialItems, saveCalendarItem, moveCalendarItem 
 
   return (
     <div className="flex min-h-screen flex-col">
-      <header className="border-b border-[#ded8ce] px-5 py-6 md:px-8">
-        <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-          <div className="min-w-0 pl-12 lg:pl-0">
+      <header className="border-b border-[#ded8ce] px-4 py-4 md:px-6 md:py-5">
+        <div className="flex flex-col gap-4 xl:grid xl:grid-cols-[minmax(0,1fr)_560px] xl:items-start xl:gap-6">
+          <div className="min-w-0">
             <p className="text-sm font-semibold text-[#10a37f]">Calendar</p>
-            <h1 className="mt-2 text-3xl font-semibold tracking-normal text-[#2b2824]">Plan tasks by date.</h1>
-            <p className="mt-2 max-w-2xl text-sm text-[#756d64]">
-              Schedule work, hold drafts on the side, and drag items when plans change.
+            <h1 className="mt-2 text-[1.9rem] font-semibold leading-[1.06] tracking-normal text-[#2b2824] md:text-[2.15rem] xl:text-[2.35rem]">
+              Schedule the work, hold the maybes.
+            </h1>
+            <p className="mt-2 max-w-xl text-[0.98rem] leading-7 text-[#756d64] md:text-base">
+              Add tasks and reminders to dates, keep unscheduled drafts nearby, and drag work into place when the plan firms up.
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="icon"
-              aria-label="Previous"
-              onClick={() => navigate(-1)}
-              className="border-[#ded8ce] bg-[#f8f5ef] text-[#625b53] hover:bg-white"
-            >
-              <ChevronLeft className="size-4" />
-            </Button>
-            <div className="min-w-[180px] text-center text-base font-semibold text-[#2b2824]">
-              {monthFormatter.format(anchorDate)}
+          <div className="flex flex-col gap-3 xl:w-[560px] xl:shrink-0 xl:items-end">
+            <div className="flex w-full items-center justify-end gap-2 overflow-hidden">
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                aria-label="Previous"
+                onClick={() => navigate(-1)}
+                className="size-9 shrink-0 border-[#ded8ce] bg-[#f8f5ef] text-[#625b53] hover:bg-white"
+              >
+                <ChevronLeft className="size-4" />
+              </Button>
+              <div className="min-w-[110px] shrink-0 text-center text-[1.05rem] font-semibold text-[#2b2824]">{monthFormatter.format(anchorDate)}</div>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                aria-label="Next"
+                onClick={() => navigate(1)}
+                className="size-9 shrink-0 border-[#ded8ce] bg-[#f8f5ef] text-[#625b53] hover:bg-white"
+              >
+                <ChevronRight className="size-4" />
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setAnchorDate(new Date())}
+                className="h-9 shrink-0 border-[#ded8ce] bg-[#f8f5ef] px-3.5 text-[#625b53] hover:bg-white"
+              >
+                <CalendarDays className="mr-2 size-4" />
+                Today
+              </Button>
+              <div className="flex h-9 shrink-0 rounded-md border border-[#ded8ce] bg-[#f8f5ef] p-1">
+                {(["month", "week"] as const).map((view) => (
+                  <button
+                    type="button"
+                    key={view}
+                    onClick={() => setMode(view)}
+                    className={cn(
+                      "rounded px-3.5 text-sm font-medium capitalize text-[#625b53] transition-colors",
+                      mode === view && "bg-white text-[#b84236] shadow-sm"
+                    )}
+                  >
+                    {view}
+                  </button>
+                ))}
+              </div>
             </div>
-            <Button
-              type="button"
-              variant="outline"
-              size="icon"
-              aria-label="Next"
-              onClick={() => navigate(1)}
-              className="border-[#ded8ce] bg-[#f8f5ef] text-[#625b53] hover:bg-white"
-            >
-              <ChevronRight className="size-4" />
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setAnchorDate(new Date())}
-              className="border-[#ded8ce] bg-[#f8f5ef] text-[#625b53] hover:bg-white"
-            >
-              <CalendarDays className="mr-2 size-4" />
-              Today
-            </Button>
-            <div className="flex h-9 rounded-md border border-[#ded8ce] bg-[#f8f5ef] p-1">
-              {(["month", "week"] as const).map((view) => (
-                <button
-                  type="button"
-                  key={view}
-                  onClick={() => setMode(view)}
-                  className={cn(
-                    "rounded px-3 text-sm font-medium capitalize text-[#625b53] transition-colors",
-                    mode === view && "bg-white text-[#b84236] shadow-sm"
-                  )}
-                >
-                  {view}
-                </button>
-              ))}
+            <div className="flex w-full justify-start xl:justify-end">
+              <Button type="button" onClick={() => openNewDialog(toDateKey(anchorDate))} className="h-10 bg-[#ef6f61] px-5 text-white hover:bg-[#df5e50]">
+                <Plus className="mr-2 size-4" />
+                New task
+              </Button>
             </div>
-            <Button type="button" onClick={() => openNewDialog(toDateKey(anchorDate))} className="bg-[#ef6f61] text-white hover:bg-[#df5e50]">
-              <Plus className="mr-2 size-4" />
-              New task
-            </Button>
           </div>
         </div>
         {error && <p className="mt-4 rounded-md border border-[#f6b2aa] bg-[#fff0ed] px-3 py-2 text-sm text-[#b84236]">{error}</p>}
       </header>
 
-      <div className="grid min-w-0 flex-1 gap-5 p-5 md:p-8 xl:grid-cols-[minmax(0,1fr)_320px]">
-        <section className="min-w-0 rounded-lg border border-[#ded8ce] bg-[#f8f5ef] shadow-sm">
-          <div className="grid grid-cols-7 border-b border-[#ded8ce] bg-[#fdfbf7] text-center text-xs font-semibold uppercase tracking-normal text-[#837b72]">
+      <div className="grid min-w-0 flex-1 gap-4 p-4 md:p-6 xl:grid-cols-[minmax(0,1fr)_minmax(290px,320px)]">
+        <section className="min-w-0 overflow-hidden rounded-lg border border-[#ded8ce] bg-[#fdfbf7] shadow-sm">
+          <div className="flex items-center justify-between gap-4 border-b border-[#ded8ce] bg-white px-5 py-4">
+            <div className="min-w-0">
+              <h2 className="text-[1.1rem] font-semibold text-[#2b2824]">{monthFormatter.format(anchorDate)}</h2>
+              <p className="mt-1 text-sm text-[#756d64]">Drop drafts or scheduled items onto any date.</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-7 border-b border-[#ded8ce] bg-white text-center text-[0.78rem] font-semibold uppercase tracking-normal text-[#837b72]">
             {weekdayLabels.map((day) => (
-              <div key={day} className="px-2 py-3">
+              <div key={day} className="px-2 py-4">
                 {day}
               </div>
             ))}
           </div>
 
-          <div className={cn("grid grid-cols-7", mode === "month" ? "auto-rows-[minmax(132px,1fr)]" : "auto-rows-[minmax(460px,1fr)]")}>
+          <div className={cn("grid grid-cols-7", mode === "month" ? "auto-rows-[minmax(130px,1fr)]" : "auto-rows-[minmax(420px,1fr)]")}>
             {visibleDays.map((date) => {
               const dateKey = toDateKey(date)
               const dayItems = sortItems(itemsByDate[dateKey] ?? [])
@@ -398,7 +409,7 @@ export function CalendarPage({ initialItems, saveCalendarItem, moveCalendarItem 
                       moveItem(itemId, dateKey)
                     }
                   }}
-                  className={cn(
+                className={cn(
                     "flex min-w-0 flex-col border-b border-r border-[#ded8ce] bg-[#fdfbf7] p-2 text-left transition-colors hover:bg-white",
                     muted && "bg-[#f4eee5] text-[#a29a91]",
                     isToday && "ring-1 ring-inset ring-[#ef6f61]"
@@ -435,12 +446,12 @@ export function CalendarPage({ initialItems, saveCalendarItem, moveCalendarItem 
               moveItem(itemId, null)
             }
           }}
-          className="rounded-lg border border-[#ded8ce] bg-[#f8f5ef] p-4 shadow-sm"
+          className="rounded-lg border border-[#ded8ce] bg-white p-4 shadow-sm"
         >
           <div className="flex items-center justify-between gap-3">
             <div>
-              <p className="text-sm font-semibold text-[#2b2824]">Draft task panel</p>
-              <p className="mt-1 text-xs text-[#756d64]">Drag drafts onto any date.</p>
+              <p className="text-[1.05rem] font-semibold text-[#2b2824]">Draft Task Panel</p>
+              <p className="mt-1 text-sm text-[#756d64]">Drag drafts onto any date.</p>
             </div>
             <Button
               type="button"
@@ -448,16 +459,20 @@ export function CalendarPage({ initialItems, saveCalendarItem, moveCalendarItem 
               size="icon"
               aria-label="Create draft"
               onClick={() => openNewDialog(null)}
-              className="border-[#ded8ce] bg-[#fdfbf7] text-[#625b53] hover:bg-white"
+              className="size-10 border-[#ded8ce] bg-[#fdfbf7] text-[#625b53] hover:bg-white"
             >
-              <Plus className="size-4" />
+              <Plus className="size-5" />
             </Button>
           </div>
 
-          <div className="mt-4 space-y-2">
+          <div className="mt-5 space-y-2">
             {draftItems.length === 0 ? (
-              <div className="rounded-md border border-dashed border-[#d7cec4] bg-[#fdfbf7] p-4 text-sm leading-6 text-[#756d64]">
-                Drafts saved from the dialog will wait here until you schedule them.
+              <div className="grid min-h-[122px] place-items-center rounded-md border border-dashed border-[#d7cec4] bg-[#fdfbf7] p-5 text-sm leading-6 text-[#756d64]">
+                <div className="max-w-[240px] text-center">
+                  <ListTodo className="mx-auto mb-2 size-5 text-[#71788a]" />
+                  <p className="text-[1rem] font-medium text-[#2b2824]">No drafts waiting</p>
+                  <p className="mt-1">Save unscheduled tasks here, then drag them onto any date.</p>
+                </div>
               </div>
             ) : (
               draftItems.map((item) => <DraftItem key={item.id} item={item} onEdit={openEditDialog} />)

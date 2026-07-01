@@ -62,6 +62,24 @@ export type KanbanTaskView = {
   updatedAt: string
 }
 
+export type KanbanCurrentUserView = {
+  id: number
+  name: string | null
+  email: string
+}
+
+export type KanbanCollaboratorView = {
+  id: number
+  boardId: number
+  userId: number | null
+  email: string
+  name: string | null
+  role: "editor"
+  status: "active" | "pending"
+  isOwner: boolean
+  createdAt: string
+}
+
 export type KanbanBoardInput = {
   name: string
   color: string
@@ -97,4 +115,9 @@ export type KanbanTaskInput = {
   syncCalendar: boolean
   syncNotes: boolean
   syncAi: boolean
+}
+
+export type KanbanInviteInput = {
+  boardId: number
+  email: string
 }

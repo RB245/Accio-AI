@@ -1,11 +1,14 @@
-import { asc, eq } from "drizzle-orm"
+import { asc, eq, inArray, or } from "drizzle-orm"
 
 import {
   createKanbanBoard,
   deleteKanbanBoard,
   deleteKanbanColumn,
   deleteKanbanTask,
+  getKanbanCollaborators,
+  inviteKanbanCollaborator,
   moveKanbanTask,
+  removeKanbanCollaborator,
   reorderKanbanColumns,
   saveKanbanBoard,
   saveKanbanColumn,
@@ -13,8 +16,9 @@ import {
 } from "@/app/kanban/actions"
 import { KanbanPage } from "@/components/kanban-page"
 import { DashboardShell } from "@/components/dashboard-shell"
-import { db, kanbanBoards, kanbanColumns, kanbanTasks } from "@/db"
-import type { KanbanBoardView, KanbanColumnView, KanbanTaskView } from "@/lib/kanban-types"
+import { db, kanbanBoardCollaborators, kanbanBoards, kanbanColumns, kanbanTasks } from "@/db"
+import { listKanbanBoardCollaborators } from "@/lib/kanban-collaboration"
+import type { KanbanBoardView, KanbanCollaboratorView, KanbanColumnView, KanbanTaskView } from "@/lib/kanban-types"
 import { syncCurrentUserByEmail } from "@/lib/sync-user"
 
 function serializeBoard(board: typeof kanbanBoards.$inferSelect): KanbanBoardView {
@@ -62,11 +66,22 @@ export default async function KanbanRoute() {
     )
   }
 
+  const collaboratorRows = await db
+    .select()
+    .from(kanbanBoardCollaborators)
+    .where(or(eq(kanbanBoardCollaborators.userId, result.user.id), eq(kanbanBoardCollaborators.email, result.user.email)))
+
+  const sharedBoardIds = collaboratorRows.map((row) => row.boardId)
+  const boardWhere =
+    sharedBoardIds.length > 0
+      ? or(eq(kanbanBoards.userId, result.user.id), inArray(kanbanBoards.id, sharedBoardIds))
+      : eq(kanbanBoards.userId, result.user.id)
+
   const [boards, columns, tasks] = await Promise.all([
     db
       .select()
       .from(kanbanBoards)
-      .where(eq(kanbanBoards.userId, result.user.id))
+      .where(boardWhere)
       .orderBy(asc(kanbanBoards.createdAt)),
     db
       .select()
@@ -79,6 +94,10 @@ export default async function KanbanRoute() {
   ])
 
   const boardIds = new Set(boards.map((board) => board.id))
+  const collaboratorEntries = await Promise.all(
+    boards.map(async (board) => [board.id, await listKanbanBoardCollaborators(board)] as const)
+  )
+  const collaboratorsByBoard = Object.fromEntries(collaboratorEntries) as Record<number, KanbanCollaboratorView[]>
 
   return (
     <DashboardShell activePage="kanban">
@@ -86,8 +105,13 @@ export default async function KanbanRoute() {
         initialBoards={boards.map(serializeBoard)}
         initialColumns={columns.filter((column) => boardIds.has(column.boardId)).map(serializeColumn)}
         initialTasks={tasks.filter((task) => boardIds.has(task.boardId)).map(serializeTask)}
+        currentUser={{ id: result.user.id, name: result.user.name, email: result.user.email }}
+        initialCollaboratorsByBoard={collaboratorsByBoard}
         createBoard={createKanbanBoard}
         deleteBoard={deleteKanbanBoard}
+        inviteCollaborator={inviteKanbanCollaborator}
+        removeCollaborator={removeKanbanCollaborator}
+        getCollaborators={getKanbanCollaborators}
         saveBoard={saveKanbanBoard}
         saveColumn={saveKanbanColumn}
         deleteColumn={deleteKanbanColumn}

@@ -3,7 +3,13 @@
 import { and, asc, eq } from "drizzle-orm"
 import { revalidatePath } from "next/cache"
 
-import { db, calendarItems, kanbanBoards, kanbanColumns, kanbanTasks } from "@/db"
+import { db, calendarItems, kanbanBoardCollaborators, kanbanBoards, kanbanColumns, kanbanTasks, users } from "@/db"
+import {
+  assertCanAccessKanbanBoard,
+  assertOwnsKanbanBoard,
+  listKanbanBoardCollaborators,
+  normalizeInviteEmail,
+} from "@/lib/kanban-collaboration"
 import {
   boardColors,
   kanbanPriorities,
@@ -12,6 +18,7 @@ import {
   type KanbanBoardCreateResult,
   type KanbanBoardView,
   type KanbanBoardUpdateInput,
+  type KanbanCollaboratorView,
   type KanbanColumnInput,
   type KanbanColumnView,
   type KanbanLabel,
@@ -107,20 +114,6 @@ function cleanDate(date: string | null | undefined) {
   return trimmed && /^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? trimmed : null
 }
 
-async function getBoardForUser(boardId: number, userId: number) {
-  const [board] = await db
-    .select()
-    .from(kanbanBoards)
-    .where(and(eq(kanbanBoards.id, boardId), eq(kanbanBoards.userId, userId)))
-    .limit(1)
-
-  if (!board) {
-    throw new Error("Kanban board not found.")
-  }
-
-  return board
-}
-
 async function syncCalendarTask(
   userId: number,
   input: {
@@ -202,7 +195,7 @@ export async function createKanbanBoard(input: KanbanBoardInput): Promise<Kanban
 
 export async function deleteKanbanBoard(boardId: number) {
   const user = await getCurrentDatabaseUser()
-  await getBoardForUser(boardId, user.id)
+  await assertOwnsKanbanBoard(boardId, user)
 
   await db.delete(kanbanBoards).where(and(eq(kanbanBoards.id, boardId), eq(kanbanBoards.userId, user.id)))
 
@@ -211,7 +204,7 @@ export async function deleteKanbanBoard(boardId: number) {
 
 export async function saveKanbanBoard(input: KanbanBoardUpdateInput) {
   const user = await getCurrentDatabaseUser()
-  await getBoardForUser(input.id, user.id)
+  await assertCanAccessKanbanBoard(input.id, user)
 
   const name = input.name.trim()
 
@@ -226,7 +219,7 @@ export async function saveKanbanBoard(input: KanbanBoardUpdateInput) {
       color: cleanColor(input.color, boardColors[0]),
       updatedAt: new Date(),
     })
-    .where(and(eq(kanbanBoards.id, input.id), eq(kanbanBoards.userId, user.id)))
+    .where(eq(kanbanBoards.id, input.id))
     .returning()
 
   if (!updated) {
@@ -239,7 +232,7 @@ export async function saveKanbanBoard(input: KanbanBoardUpdateInput) {
 
 export async function saveKanbanColumn(input: KanbanColumnInput) {
   const user = await getCurrentDatabaseUser()
-  await getBoardForUser(input.boardId, user.id)
+  await assertCanAccessKanbanBoard(input.boardId, user)
 
   const name = input.name.trim()
   if (!name) {
@@ -292,7 +285,7 @@ export async function saveKanbanColumn(input: KanbanColumnInput) {
 
 export async function deleteKanbanColumn(boardId: number, columnId: number) {
   const user = await getCurrentDatabaseUser()
-  await getBoardForUser(boardId, user.id)
+  await assertCanAccessKanbanBoard(boardId, user)
 
   await db.delete(kanbanColumns).where(and(eq(kanbanColumns.id, columnId), eq(kanbanColumns.boardId, boardId)))
 
@@ -311,7 +304,7 @@ export async function deleteKanbanColumn(boardId: number, columnId: number) {
 
 export async function reorderKanbanColumns(boardId: number, orderedColumnIds: number[]) {
   const user = await getCurrentDatabaseUser()
-  await getBoardForUser(boardId, user.id)
+  await assertCanAccessKanbanBoard(boardId, user)
 
   for (const [index, columnId] of orderedColumnIds.entries()) {
     await db
@@ -325,7 +318,7 @@ export async function reorderKanbanColumns(boardId: number, orderedColumnIds: nu
 
 export async function saveKanbanTask(input: KanbanTaskInput) {
   const user = await getCurrentDatabaseUser()
-  await getBoardForUser(input.boardId, user.id)
+  await assertCanAccessKanbanBoard(input.boardId, user)
 
   const [column] = await db
     .select()
@@ -427,7 +420,7 @@ export async function saveKanbanTask(input: KanbanTaskInput) {
 
 export async function deleteKanbanTask(boardId: number, taskId: number) {
   const user = await getCurrentDatabaseUser()
-  await getBoardForUser(boardId, user.id)
+  await assertCanAccessKanbanBoard(boardId, user)
 
   const [task] = await db
     .delete(kanbanTasks)
@@ -453,7 +446,7 @@ export async function deleteKanbanTask(boardId: number, taskId: number) {
 
 export async function moveKanbanTask(boardId: number, taskId: number, columnId: number, orderedTaskIds: number[]) {
   const user = await getCurrentDatabaseUser()
-  await getBoardForUser(boardId, user.id)
+  await assertCanAccessKanbanBoard(boardId, user)
 
   const [column] = await db
     .select()
@@ -480,4 +473,67 @@ export async function moveKanbanTask(boardId: number, taskId: number, columnId: 
   }
 
   revalidatePath("/kanban")
+}
+
+export async function inviteKanbanCollaborator(input: {
+  boardId: number
+  email: string
+}): Promise<KanbanCollaboratorView[]> {
+  const user = await getCurrentDatabaseUser()
+  const board = await assertOwnsKanbanBoard(input.boardId, user)
+  const email = normalizeInviteEmail(input.email)
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new Error("Enter a valid email address.")
+  }
+
+  if (email === user.email) {
+    throw new Error("You already own this board.")
+  }
+
+  const [invitedUser] = await db.select().from(users).where(eq(users.email, email)).limit(1)
+
+  if (invitedUser?.id === board.userId) {
+    throw new Error("You already own this board.")
+  }
+
+  await db
+    .insert(kanbanBoardCollaborators)
+    .values({
+      boardId: board.id,
+      email,
+      userId: invitedUser?.id ?? null,
+      invitedByUserId: user.id,
+      role: "editor",
+    })
+    .onConflictDoUpdate({
+      target: [kanbanBoardCollaborators.boardId, kanbanBoardCollaborators.email],
+      set: {
+        userId: invitedUser?.id ?? null,
+        invitedByUserId: user.id,
+        role: "editor",
+        updatedAt: new Date(),
+      },
+    })
+
+  revalidatePath("/kanban")
+  return listKanbanBoardCollaborators(board)
+}
+
+export async function removeKanbanCollaborator(boardId: number, collaboratorId: number): Promise<KanbanCollaboratorView[]> {
+  const user = await getCurrentDatabaseUser()
+  const board = await assertOwnsKanbanBoard(boardId, user)
+
+  await db
+    .delete(kanbanBoardCollaborators)
+    .where(and(eq(kanbanBoardCollaborators.id, collaboratorId), eq(kanbanBoardCollaborators.boardId, boardId)))
+
+  revalidatePath("/kanban")
+  return listKanbanBoardCollaborators(board)
+}
+
+export async function getKanbanCollaborators(boardId: number): Promise<KanbanCollaboratorView[]> {
+  const user = await getCurrentDatabaseUser()
+  const { board } = await assertCanAccessKanbanBoard(boardId, user)
+  return listKanbanBoardCollaborators(board)
 }

@@ -8,11 +8,26 @@ import {
   Edit3,
   GripVertical,
   Link2,
+  MessageCircle,
   Plus,
   StickyNote,
   Trash2,
+  UserPlus,
+  Users2,
   X,
 } from "lucide-react"
+import {
+  LiveblocksProvider,
+  RoomProvider,
+  useBroadcastEvent,
+  useEventListener,
+  useMutation,
+  useOthers,
+  useSelf,
+  useThreads,
+  useUpdateMyPresence,
+} from "@liveblocks/react"
+import { Composer, Thread } from "@liveblocks/react-ui"
 import * as React from "react"
 
 import { Button } from "@/components/ui/button"
@@ -23,6 +38,8 @@ import {
   type KanbanBoardInput,
   type KanbanBoardCreateResult,
   type KanbanBoardView,
+  type KanbanCollaboratorView,
+  type KanbanCurrentUserView,
   type KanbanColumnInput,
   type KanbanColumnView,
   type KanbanLabel,
@@ -36,8 +53,13 @@ type KanbanPageProps = {
   initialBoards: KanbanBoardView[]
   initialColumns: KanbanColumnView[]
   initialTasks: KanbanTaskView[]
+  currentUser: KanbanCurrentUserView
+  initialCollaboratorsByBoard: Record<number, KanbanCollaboratorView[]>
   createBoard: (input: KanbanBoardInput) => Promise<KanbanBoardCreateResult>
   deleteBoard: (boardId: number) => Promise<void>
+  inviteCollaborator: (input: { boardId: number; email: string }) => Promise<KanbanCollaboratorView[]>
+  removeCollaborator: (boardId: number, collaboratorId: number) => Promise<KanbanCollaboratorView[]>
+  getCollaborators: (boardId: number) => Promise<KanbanCollaboratorView[]>
   saveBoard: (input: { id: number; name: string; color: string }) => Promise<KanbanBoardView>
   saveColumn: (input: KanbanColumnInput) => Promise<KanbanColumnView>
   deleteColumn: (boardId: number, columnId: number) => Promise<void>
@@ -75,6 +97,14 @@ type TaskDialog = {
   syncCalendar: boolean
   syncNotes: boolean
   syncAi: boolean
+}
+
+type KanbanSyncPayload = {
+  boardId: number
+  boards: KanbanBoardView[]
+  columns: KanbanColumnView[]
+  tasks: KanbanTaskView[]
+  collaborators: KanbanCollaboratorView[]
 }
 
 const emptyBoardDialog: BoardDialog = {
@@ -143,12 +173,116 @@ function upsertById<T extends { id: number }>(items: T[], item: T) {
     : [...items, item]
 }
 
+function getRoomId(boardId: number) {
+  return `kanban:board:${boardId}`
+}
+
+function initials(nameOrEmail: string) {
+  const parts = nameOrEmail.trim().split(/\s+/).filter(Boolean)
+  if (parts.length >= 2) {
+    return `${parts[0][0]}${parts[1][0]}`.toUpperCase()
+  }
+
+  return nameOrEmail.slice(0, 2).toUpperCase()
+}
+
+function taskThreadQuery(boardId: number, taskId: number) {
+  return {
+    metadata: {
+      type: "kanban-task" as const,
+      boardId,
+      taskId,
+    },
+  }
+}
+
+function threadCommentCount(thread: { comments?: unknown[] }) {
+  return thread.comments?.length ?? 0
+}
+
+function LiveblocksRoom({
+  boardId,
+  selectedTaskId,
+  onSync,
+  syncRef,
+  children,
+}: {
+  boardId: number | null
+  selectedTaskId: number | null
+  onSync: (payload: KanbanSyncPayload) => void
+  syncRef: React.MutableRefObject<((payload: KanbanSyncPayload) => void) | null>
+  children: React.ReactNode
+}) {
+  return (
+    <LiveblocksProvider authEndpoint="/api/liveblocks-auth">
+      {boardId ? (
+        <RoomProvider id={getRoomId(boardId)} initialPresence={{ selectedTaskId: null }} initialStorage={{ boardVersion: 0 }}>
+          <KanbanPresenceBridge selectedTaskId={selectedTaskId} />
+          <LiveKanbanSync boardId={boardId} onSync={onSync} syncRef={syncRef} />
+          {children}
+        </RoomProvider>
+      ) : (
+        children
+      )}
+    </LiveblocksProvider>
+  )
+}
+
+function KanbanPresenceBridge({ selectedTaskId }: { selectedTaskId: number | null }) {
+  const updateMyPresence = useUpdateMyPresence()
+
+  React.useEffect(() => {
+    updateMyPresence({ selectedTaskId })
+  }, [selectedTaskId, updateMyPresence])
+
+  return null
+}
+
+function LiveKanbanSync({
+  boardId,
+  onSync,
+  syncRef,
+}: {
+  boardId: number
+  onSync: (payload: KanbanSyncPayload) => void
+  syncRef: React.MutableRefObject<((payload: KanbanSyncPayload) => void) | null>
+}) {
+  const broadcast = useBroadcastEvent()
+  const bumpBoardVersion = useMutation(({ storage }) => {
+    storage.set("boardVersion", Date.now())
+  }, [])
+
+  useEventListener(({ event }) => {
+    if (event.type === "kanban-sync" && event.boardId === boardId) {
+      onSync(event)
+    }
+  })
+
+  React.useEffect(() => {
+    syncRef.current = (payload) => {
+      bumpBoardVersion()
+      broadcast({ type: "kanban-sync", ...payload })
+    }
+
+    return () => {
+      syncRef.current = null
+    }
+  }, [broadcast, bumpBoardVersion, syncRef])
+
+  return null
+}
+
 export function KanbanPage({
   initialBoards,
   initialColumns,
   initialTasks,
+  currentUser,
+  initialCollaboratorsByBoard,
   createBoard,
   deleteBoard,
+  inviteCollaborator,
+  removeCollaborator,
+  getCollaborators,
   saveBoard,
   saveColumn,
   deleteColumn,
@@ -164,11 +298,22 @@ export function KanbanPage({
   const [boardDialog, setBoardDialog] = React.useState<BoardDialog>(emptyBoardDialog)
   const [columnDialog, setColumnDialog] = React.useState<ColumnDialog>(emptyColumnDialog)
   const [taskDialog, setTaskDialog] = React.useState<TaskDialog | null>(null)
+  const [collaborationOpen, setCollaborationOpen] = React.useState(false)
+  const [collaboratorsByBoard, setCollaboratorsByBoard] = React.useState(initialCollaboratorsByBoard)
   const [newColumnName, setNewColumnName] = React.useState("")
   const [error, setError] = React.useState<string | null>(null)
   const [pending, startTransition] = React.useTransition()
+  const [selectedTaskId, setSelectedTaskId] = React.useState<number | null>(null)
+  const liveSyncRef = React.useRef<((payload: KanbanSyncPayload) => void) | null>(null)
+  const boardsRef = React.useRef(boards)
+  const columnsRef = React.useRef(columns)
+  const tasksRef = React.useRef(tasks)
+  const collaboratorsRef = React.useRef(collaboratorsByBoard)
 
   const selectedBoard = boards.find((board) => board.id === selectedBoardId) ?? null
+  const selectedCollaborators = selectedBoardId ? collaboratorsByBoard[selectedBoardId] ?? [] : []
+  const selectedBoardOwner = selectedCollaborators.find((collaborator) => collaborator.isOwner)
+  const canManageSelectedBoard = selectedBoardOwner?.userId === currentUser.id
   const boardColumns = selectedBoardId
     ? sortColumns(columns.filter((column) => column.boardId === selectedBoardId))
     : []
@@ -196,12 +341,19 @@ export function KanbanPage({
     runAction(async () => {
       if (boardDialog.id) {
         const updated = await saveBoard({ id: boardDialog.id, name, color })
-        setBoards((current) => upsertById(current, updated))
+        const nextBoards = upsertById(boardsRef.current, updated)
+        commitBoards(nextBoards)
         setSelectedBoardId(updated.id)
+        publishKanbanSync(updated.id, {
+          boards: nextBoards,
+          columns: columnsRef.current,
+          tasks: tasksRef.current,
+          collaborators: collaboratorsRef.current[updated.id] ?? [],
+        })
       } else {
         const created = await createBoard({ name, color })
-        setBoards((current) => [...current, created.board])
-        setColumns((current) => [...current, ...created.columns])
+        commitBoards([...boardsRef.current, created.board])
+        commitColumns([...columnsRef.current, ...created.columns])
         setSelectedBoardId(created.board.id)
       }
       setBoardDialog(emptyBoardDialog)
@@ -230,15 +382,24 @@ export function KanbanPage({
 
     runAction(async () => {
       await deleteBoard(board.id)
-      setBoards((current) => current.filter((item) => item.id !== board.id))
-      setColumns((current) => current.filter((column) => column.boardId !== board.id))
-      setTasks((current) => current.filter((task) => task.boardId !== board.id))
+      const nextBoards = boardsRef.current.filter((item) => item.id !== board.id)
+      const nextColumns = columnsRef.current.filter((column) => column.boardId !== board.id)
+      const nextTasks = tasksRef.current.filter((task) => task.boardId !== board.id)
+      commitBoards(nextBoards)
+      commitColumns(nextColumns)
+      commitTasks(nextTasks)
       setSelectedBoardId((current) => {
         if (current !== board.id) {
           return current
         }
 
-        return boards.find((item) => item.id !== board.id)?.id ?? null
+        return nextBoards[0]?.id ?? null
+      })
+      publishKanbanSync(board.id, {
+        boards: nextBoards,
+        columns: nextColumns,
+        tasks: nextTasks,
+        collaborators: [],
       })
     })
   }
@@ -269,7 +430,12 @@ export function KanbanPage({
         name,
         color: boardColors[boardColumns.length % boardColors.length],
       })
-      setColumns((current) => upsertById(current, saved))
+      const nextColumns = upsertById(columnsRef.current, saved)
+      commitColumns(nextColumns)
+      publishKanbanSync(selectedBoardId, {
+        columns: nextColumns,
+        collaborators: collaboratorsRef.current[selectedBoardId] ?? [],
+      })
       setNewColumnName("")
     })
   }
@@ -288,7 +454,12 @@ export function KanbanPage({
         name: columnDialog.name,
         color: columnDialog.color,
       })
-      setColumns((current) => upsertById(current, saved))
+      const nextColumns = upsertById(columnsRef.current, saved)
+      commitColumns(nextColumns)
+      publishKanbanSync(boardId, {
+        columns: nextColumns,
+        collaborators: collaboratorsRef.current[boardId] ?? [],
+      })
       setColumnDialog(emptyColumnDialog)
     })
   }
@@ -302,8 +473,15 @@ export function KanbanPage({
 
     runAction(async () => {
       await deleteColumn(column.boardId, column.id)
-      setColumns((current) => current.filter((item) => item.id !== column.id))
-      setTasks((current) => current.filter((task) => task.columnId !== column.id))
+      const nextColumns = columnsRef.current.filter((item) => item.id !== column.id)
+      const nextTasks = tasksRef.current.filter((task) => task.columnId !== column.id)
+      commitColumns(nextColumns)
+      commitTasks(nextTasks)
+      publishKanbanSync(column.boardId, {
+        columns: nextColumns,
+        tasks: nextTasks,
+        collaborators: collaboratorsRef.current[column.boardId] ?? [],
+      })
     })
   }
 
@@ -324,19 +502,23 @@ export function KanbanPage({
     nextColumns.splice(targetIndex, 0, moved)
     const orderedIds = nextColumns.map((item) => item.id)
 
-    setColumns((current) =>
-      current.map((item) => {
-        const position = orderedIds.indexOf(item.id)
-        return position >= 0 ? { ...item, position } : item
-      })
-    )
+    const reorderedColumns = columnsRef.current.map((item) => {
+      const position = orderedIds.indexOf(item.id)
+      return position >= 0 ? { ...item, position } : item
+    })
+    commitColumns(reorderedColumns)
 
     runAction(async () => {
       await reorderColumns(selectedBoardId, orderedIds)
+      publishKanbanSync(selectedBoardId, {
+        columns: reorderedColumns,
+        collaborators: collaboratorsRef.current[selectedBoardId] ?? [],
+      })
     })
   }
 
   function openEditTaskDialog(task: KanbanTaskView) {
+    setSelectedTaskId(task.id)
     setTaskDialog({
       open: true,
       id: task.id,
@@ -374,8 +556,14 @@ export function KanbanPage({
 
     runAction(async () => {
       const saved = await saveTask(payload)
-      setTasks((current) => upsertById(current, saved))
+      const nextTasks = upsertById(tasksRef.current, saved)
+      commitTasks(nextTasks)
+      publishKanbanSync(payload.boardId, {
+        tasks: nextTasks,
+        collaborators: collaboratorsRef.current[payload.boardId] ?? [],
+      })
       setTaskDialog(null)
+      setSelectedTaskId(null)
     })
   }
 
@@ -388,7 +576,15 @@ export function KanbanPage({
 
     runAction(async () => {
       await deleteTask(task.boardId, task.id)
-      setTasks((current) => current.filter((item) => item.id !== task.id))
+      const nextTasks = tasksRef.current.filter((item) => item.id !== task.id)
+      commitTasks(nextTasks)
+      publishKanbanSync(task.boardId, {
+        tasks: nextTasks,
+        collaborators: collaboratorsRef.current[task.boardId] ?? [],
+      })
+      if (selectedTaskId === task.id) {
+        setSelectedTaskId(null)
+      }
     })
   }
 
@@ -397,13 +593,13 @@ export function KanbanPage({
       return
     }
 
-    const movedTask = tasks.find((task) => task.id === taskId)
+    const movedTask = tasksRef.current.find((task) => task.id === taskId)
     if (!movedTask) {
       return
     }
 
     const currentTargetTasks = sortTasks(
-      tasks.filter((task) => task.boardId === selectedBoardId && task.columnId === targetColumnId && task.id !== taskId)
+      tasksRef.current.filter((task) => task.boardId === selectedBoardId && task.columnId === targetColumnId && task.id !== taskId)
     )
     const insertIndex = beforeTaskId
       ? Math.max(
@@ -419,42 +615,120 @@ export function KanbanPage({
     })
     const orderedIds = nextTargetTasks.map((task) => task.id)
 
-    setTasks((current) => {
-      const targetIdSet = new Set(orderedIds)
-      return current.map((task) => {
-        if (task.id === taskId) {
-          return { ...task, columnId: targetColumnId, position: orderedIds.indexOf(task.id) }
-        }
+    const targetIdSet = new Set(orderedIds)
+    const nextTasks = tasksRef.current.map((task) => {
+      if (task.id === taskId) {
+        return { ...task, columnId: targetColumnId, position: orderedIds.indexOf(task.id) }
+      }
 
-        if (task.columnId === targetColumnId && targetIdSet.has(task.id)) {
-          return { ...task, position: orderedIds.indexOf(task.id) }
-        }
+      if (task.columnId === targetColumnId && targetIdSet.has(task.id)) {
+        return { ...task, position: orderedIds.indexOf(task.id) }
+      }
 
-        return task
-      })
+      return task
     })
+    commitTasks(nextTasks)
 
     runAction(async () => {
       await moveTask(selectedBoardId, taskId, targetColumnId, orderedIds)
+      publishKanbanSync(selectedBoardId, {
+        tasks: nextTasks,
+        collaborators: collaboratorsRef.current[selectedBoardId] ?? [],
+      })
+    })
+  }
+
+  React.useEffect(() => {
+    boardsRef.current = boards
+  }, [boards])
+
+  React.useEffect(() => {
+    columnsRef.current = columns
+  }, [columns])
+
+  React.useEffect(() => {
+    tasksRef.current = tasks
+  }, [tasks])
+
+  React.useEffect(() => {
+    collaboratorsRef.current = collaboratorsByBoard
+  }, [collaboratorsByBoard])
+
+  function commitBoards(nextBoards: KanbanBoardView[]) {
+    boardsRef.current = nextBoards
+    setBoards(nextBoards)
+  }
+
+  function commitColumns(nextColumns: KanbanColumnView[]) {
+    columnsRef.current = nextColumns
+    setColumns(nextColumns)
+  }
+
+  function commitTasks(nextTasks: KanbanTaskView[]) {
+    tasksRef.current = nextTasks
+    setTasks(nextTasks)
+  }
+
+  function commitCollaborators(boardId: number, collaborators: KanbanCollaboratorView[]) {
+    collaboratorsRef.current = { ...collaboratorsRef.current, [boardId]: collaborators }
+    setCollaboratorsByBoard((current) => ({ ...current, [boardId]: collaborators }))
+  }
+
+  function publishKanbanSync(boardId: number, snapshot?: Partial<Omit<KanbanSyncPayload, "boardId">>) {
+    liveSyncRef.current?.({
+      boardId,
+      boards: snapshot?.boards ?? boardsRef.current,
+      columns: snapshot?.columns ?? columnsRef.current,
+      tasks: snapshot?.tasks ?? tasksRef.current,
+      collaborators: snapshot?.collaborators ?? collaboratorsRef.current[boardId] ?? [],
+    })
+  }
+
+  function applyKanbanSync(payload: KanbanSyncPayload) {
+    commitBoards(payload.boards)
+    commitColumns(payload.columns)
+    commitTasks(payload.tasks)
+    commitCollaborators(payload.boardId, payload.collaborators)
+    setSelectedBoardId((current) => (payload.boards.some((board) => board.id === current) ? current : payload.boards[0]?.id ?? null))
+  }
+
+  function setCollaborators(boardId: number, collaborators: KanbanCollaboratorView[]) {
+    commitCollaborators(boardId, collaborators)
+  }
+
+  function submitInvite(boardId: number, email: string) {
+    runAction(async () => {
+      const collaborators = await inviteCollaborator({ boardId, email })
+      commitCollaborators(boardId, collaborators)
+      publishKanbanSync(boardId, { collaborators })
+    })
+  }
+
+  function removeInvite(boardId: number, collaboratorId: number) {
+    runAction(async () => {
+      const collaborators = await removeCollaborator(boardId, collaboratorId)
+      commitCollaborators(boardId, collaborators)
+      publishKanbanSync(boardId, { collaborators })
     })
   }
 
   return (
+    <LiveblocksRoom boardId={selectedBoard?.id ?? null} selectedTaskId={selectedTaskId} onSync={applyKanbanSync} syncRef={liveSyncRef}>
     <div className="flex min-h-screen flex-col">
-      <header className="border-b border-[#e9dfd0] px-5 py-7 md:px-8 md:py-8">
+      <header className="border-b border-[#e9dfd0] px-5 py-5 md:px-8">
         <div className="min-w-0 pl-12 lg:pl-0">
           <p className="inline-flex items-center gap-2 text-sm font-semibold text-[#d95345]">
             <Columns3 className="size-4 text-[#c98d54]" />
             Task / Kanban
           </p>
-          <h1 className="mt-3 max-w-3xl text-[2.5rem] font-semibold tracking-normal text-[#171923] md:text-5xl">
+          <h1 className="mt-2 max-w-3xl text-3xl font-semibold tracking-normal text-[#171923] md:text-[2rem] md:leading-tight">
             Shape the work as it moves.
           </h1>
         </div>
         {error && <p className="mt-4 rounded-md border border-[#f6b2aa] bg-[#fff0ed] px-3 py-2 text-sm text-[#b84236]">{error}</p>}
       </header>
 
-      <div className="grid min-w-0 flex-1 gap-4 p-4 md:p-6 xl:grid-cols-[clamp(240px,21vw,272px)_minmax(0,1fr)]">
+      <div className="grid min-w-0 flex-1 gap-4 p-4 md:p-6 xl:grid-cols-[280px_minmax(0,1fr)]">
         <aside className="h-fit rounded-lg border border-[#ded8ce] bg-[#fffdf8] p-4 shadow-sm">
           <div className="flex items-center justify-between gap-3">
             <h2 className="text-lg font-semibold text-[#171923]">Boards</h2>
@@ -506,14 +780,16 @@ export function KanbanPage({
                     >
                       <Edit3 className="size-4" />
                     </button>
-                    <button
-                      type="button"
-                      aria-label={`Delete ${board.name}`}
-                      onClick={() => removeBoard(board)}
-                      className="grid size-7 shrink-0 place-items-center rounded-md text-[#837b72] hover:bg-white hover:text-[#b84236]"
-                    >
-                      <Trash2 className="size-4" />
-                    </button>
+                    {(collaboratorsByBoard[board.id] ?? []).find((collaborator) => collaborator.isOwner)?.userId === currentUser.id && (
+                      <button
+                        type="button"
+                        aria-label={`Delete ${board.name}`}
+                        onClick={() => removeBoard(board)}
+                        className="grid size-7 shrink-0 place-items-center rounded-md text-[#837b72] hover:bg-white hover:text-[#b84236]"
+                      >
+                        <Trash2 className="size-4" />
+                      </button>
+                    )}
                   </div>
                 )
               })
@@ -542,17 +818,27 @@ export function KanbanPage({
             </div>
           ) : (
             <div className="min-w-0 overflow-hidden rounded-lg border border-[#ded8ce] bg-[#fffdf8] shadow-sm">
-              <div className="flex flex-col gap-3 px-5 py-5 lg:flex-row lg:items-start lg:justify-between">
+              <div className="grid gap-4 border-b border-[#eadfd2] px-5 py-5 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-start">
                 <div className="min-w-0">
                   <div className="flex min-w-0 items-center gap-2">
                     <span className="size-3 rounded-full" style={{ backgroundColor: selectedBoard.color }} />
-                    <h2 className="truncate text-[1.45rem] font-semibold text-[#171923]">{selectedBoard.name}</h2>
+                    <h2 className="truncate text-[1.75rem] font-semibold leading-tight text-[#171923]">{selectedBoard.name}</h2>
                   </div>
                   <p className="mt-1 text-sm text-[#5f6673]">
                     {boardColumns.length}/5 columns - {boardTasks.length} task{boardTasks.length === 1 ? "" : "s"}
                   </p>
+                  <ActiveCollaborators collaborators={selectedCollaborators} />
                 </div>
-                <div className="flex w-full flex-col gap-2 sm:flex-row lg:w-auto">
+                <div className="flex w-full min-w-0 flex-col gap-2 sm:flex-row xl:w-auto xl:justify-end">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => setCollaborationOpen(true)}
+                    className="h-10 shrink-0 border-[#ded8ce] bg-[#fffaf1] px-3 text-[#2b2824] hover:bg-white"
+                  >
+                    <Users2 className="mr-2 size-4" />
+                    Collaboration
+                  </Button>
                   <input
                     value={newColumnName}
                     onChange={(event) => setNewColumnName(event.target.value)}
@@ -569,7 +855,7 @@ export function KanbanPage({
                     type="button"
                     onClick={submitInlineColumn}
                     disabled={boardColumns.length >= 5 || !newColumnName.trim()}
-                    className="h-10 bg-[#ef4d3f] px-4 text-white hover:bg-[#df4134]"
+                    className="h-10 shrink-0 bg-[#ef4d3f] px-4 text-white hover:bg-[#df4134]"
                   >
                     <Plus className="mr-2 size-4" />
                     Column
@@ -577,11 +863,11 @@ export function KanbanPage({
                 </div>
               </div>
 
-              <div className="min-w-0 overflow-x-auto px-5 pb-5">
+              <div className="min-w-0 overflow-x-auto px-5 py-5">
                 <div
-                  className="grid min-w-[720px] gap-3 lg:grid-flow-col"
+                  className="grid min-w-[720px] gap-4 lg:grid-flow-col"
                   style={{
-                    gridAutoColumns: "minmax(clamp(212px, 16.5vw, 242px), 1fr)",
+                    gridAutoColumns: "minmax(clamp(220px, 17vw, 260px), 1fr)",
                   }}
                 >
                   {boardColumns.map((column) => {
@@ -634,11 +920,34 @@ export function KanbanPage({
           columns={boardColumns}
           setDialog={setTaskDialog}
           pending={pending}
-          onClose={() => setTaskDialog(null)}
+          onClose={() => {
+            setTaskDialog(null)
+            setSelectedTaskId(null)
+          }}
           onSubmit={submitTask}
         />
       )}
+
+      {collaborationOpen && selectedBoard && (
+        <CollaborationDialog
+          board={selectedBoard}
+          collaborators={selectedCollaborators}
+          currentUser={currentUser}
+          canManage={canManageSelectedBoard}
+          pending={pending}
+          onClose={() => setCollaborationOpen(false)}
+          onInvite={(email) => submitInvite(selectedBoard.id, email)}
+          onRemove={(collaboratorId) => removeInvite(selectedBoard.id, collaboratorId)}
+          onRefresh={() =>
+            runAction(async () => {
+              const collaborators = await getCollaborators(selectedBoard.id)
+              setCollaborators(selectedBoard.id, collaborators)
+            })
+          }
+        />
+      )}
     </div>
+    </LiveblocksRoom>
   )
 }
 
@@ -733,6 +1042,9 @@ function TaskCard({
   onDelete: () => void
   onDropBefore: (taskId: number) => void
 }) {
+  const { threads } = useThreads({ query: taskThreadQuery(task.boardId, task.id) })
+  const commentCount = threads?.reduce((total, thread) => total + threadCommentCount(thread), 0) ?? 0
+
   return (
     <article
       draggable
@@ -755,6 +1067,14 @@ function TaskCard({
           {task.description && <p className="mt-1 line-clamp-2 text-xs leading-5 text-[#756d64]">{task.description}</p>}
         </div>
         <div className="flex shrink-0 items-center gap-1">
+          <button type="button" aria-label="Open task comments" onClick={onEdit} className="relative text-[#837b72] hover:text-[#10a37f]">
+            <MessageCircle className="size-3.5" />
+            {commentCount > 0 && (
+              <span className="absolute -right-2 -top-2 grid min-w-4 place-items-center rounded-full bg-[#10a37f] px-1 text-[0.58rem] font-bold text-white">
+                {commentCount}
+              </span>
+            )}
+          </button>
           <button type="button" aria-label="Edit task" onClick={onEdit} className="text-[#837b72] hover:text-[#ef6f61]">
             <Edit3 className="size-3.5" />
           </button>
@@ -906,6 +1226,8 @@ function TaskDialogView({
 }) {
   const [labelName, setLabelName] = React.useState(dialog.labels[0]?.name ?? "")
   const [labelColor, setLabelColor] = React.useState<string>(dialog.labels[0]?.color ?? "#84a11f")
+  const taskId = dialog.id ?? null
+  const taskBoardId = dialog.boardId ?? null
 
   function addLabel() {
     const name = labelName.trim()
@@ -926,7 +1248,7 @@ function TaskDialogView({
 
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-stone-950/35 p-3 backdrop-blur-sm">
-      <div className="max-h-[90vh] w-full max-w-[560px] overflow-y-auto rounded-lg border border-[#ded8ce] bg-white shadow-xl">
+      <div className="max-h-[90vh] w-full max-w-[720px] overflow-y-auto rounded-lg border border-[#ded8ce] bg-white shadow-xl">
         <div className="flex items-center justify-between gap-4 px-5 pt-5">
           <h2 className="text-[1.05rem] font-semibold text-[#171923]">{dialog.id ? "Edit task" : "Create task"}</h2>
           <button type="button" onClick={onClose} aria-label="Close task dialog" className="text-[#171923] hover:text-[#ef4d3f]">
@@ -1072,9 +1394,224 @@ function TaskDialogView({
           <Button type="button" onClick={onSubmit} disabled={pending} className="h-10 w-full bg-[#ef4d3f] text-white hover:bg-[#df4134]">
             {pending ? "Saving..." : dialog.id ? "Save task" : "Create task"}
           </Button>
+
+          {taskId && taskBoardId && <TaskComments boardId={taskBoardId} taskId={taskId} />}
         </div>
       </div>
     </div>
+  )
+}
+
+function TaskComments({ boardId, taskId }: { boardId: number; taskId: number }) {
+  const { threads, isLoading, error } = useThreads({ query: taskThreadQuery(boardId, taskId) })
+
+  return (
+    <section className="mt-1 grid gap-3 border-t border-[#ead8bf] pt-4">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold text-[#171923]">Comments</h3>
+        <span className="text-xs font-semibold text-[#756d64]">
+          {threads?.reduce((total, thread) => total + threadCommentCount(thread), 0) ?? 0}
+        </span>
+      </div>
+      {isLoading && <p className="rounded-md border border-[#ead8bf] bg-[#fffaf1] px-3 py-2 text-sm text-[#756d64]">Loading comments...</p>}
+      {error && <p className="rounded-md border border-[#f6b2aa] bg-[#fff0ed] px-3 py-2 text-sm text-[#b84236]">Comments could not load.</p>}
+      {threads?.map((thread) => (
+        <Thread
+          key={thread.id}
+          thread={thread}
+          showResolveAction={false}
+          showSubscription={false}
+          showComposer="collapsed"
+          showComposerFormattingControls={false}
+          className="rounded-md border border-[#ead8bf] bg-[#fffaf1]"
+        />
+      ))}
+      <Composer
+        metadata={{ type: "kanban-task", boardId, taskId }}
+        showAttachments={false}
+        showFormattingControls={false}
+        className="rounded-md border border-[#ead8bf] bg-[#fffaf1]"
+      />
+    </section>
+  )
+}
+
+function ActiveCollaborators({ collaborators }: { collaborators: KanbanCollaboratorView[] }) {
+  const others = useOthers()
+  const self = useSelf()
+
+  const activePeople = [
+    ...(self
+      ? [
+          {
+            key: `self-${self.connectionId}`,
+            name: self.info.name || self.info.email,
+            color: self.info.color,
+          },
+        ]
+      : []),
+    ...others.map((user) => ({
+      key: `other-${user.connectionId}`,
+      name: user.info.name || user.info.email,
+      color: user.info.color,
+    })),
+  ]
+
+  return (
+    <div className="mt-3 flex w-full min-w-0 items-center gap-2">
+      <div className="flex -space-x-2">
+        {activePeople.length === 0 ? (
+          <span className="grid size-8 place-items-center rounded-full border border-dashed border-[#d7cec4] bg-white text-[0.65rem] font-semibold text-[#756d64]">
+            0
+          </span>
+        ) : (
+          activePeople.slice(0, 3).map((person) => (
+            <span
+              key={person.key}
+              title={person.name}
+              className="grid size-8 place-items-center rounded-full border-2 border-[#fffdf8] text-[0.68rem] font-semibold text-white shadow-sm"
+              style={{ backgroundColor: person.color }}
+            >
+              {initials(person.name)}
+            </span>
+          ))
+        )}
+        {activePeople.length > 3 && (
+          <span className="ml-1 grid size-8 place-items-center rounded-full border-2 border-[#fffdf8] bg-[#2b2824] text-[0.65rem] font-semibold text-white">
+            +{activePeople.length - 3}
+          </span>
+        )}
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium leading-5 text-[#4b5563]">
+          {activePeople.length} active now
+          {collaborators.length > 0 ? ` - ${collaborators.length} shared` : ""}
+        </p>
+      </div>
+    </div>
+  )
+}
+
+function CollaborationDialog({
+  board,
+  collaborators,
+  currentUser,
+  canManage,
+  pending,
+  onClose,
+  onInvite,
+  onRemove,
+  onRefresh,
+}: {
+  board: KanbanBoardView
+  collaborators: KanbanCollaboratorView[]
+  currentUser: KanbanCurrentUserView
+  canManage: boolean
+  pending: boolean
+  onClose: () => void
+  onInvite: (email: string) => void
+  onRemove: (collaboratorId: number) => void
+  onRefresh: () => void
+}) {
+  const [email, setEmail] = React.useState("")
+
+  React.useEffect(() => {
+    setEmail("")
+  }, [board.id])
+
+  function submitInvite() {
+    const nextEmail = email.trim()
+    if (!nextEmail) {
+      return
+    }
+
+    onInvite(nextEmail)
+    setEmail("")
+  }
+
+  return (
+    <BaseDialog title="Collaboration" onClose={onClose} wide>
+      <div className="grid gap-1">
+        <p className="text-sm font-semibold text-[#2b2824]">{board.name}</p>
+        <p className="text-xs text-[#756d64]">{collaborators.length} people have access to this board.</p>
+      </div>
+
+      <div className="grid gap-2 rounded-md border border-[#ead8bf] bg-[#fffaf1] p-3">
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="text-sm font-semibold text-[#171923]">Invite by email</h3>
+          <Button type="button" variant="outline" onClick={onRefresh} disabled={pending} className="h-8 border-[#ded8ce] bg-white text-[#625b53] hover:bg-[#fffaf1]">
+            <Link2 className="mr-2 size-3.5" />
+            Refresh
+          </Button>
+        </div>
+        <div className="flex gap-2">
+          <input
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                submitInvite()
+              }
+            }}
+            disabled={!canManage || pending}
+            placeholder="teammate@company.com"
+            className="h-10 min-w-0 flex-1 rounded-md border border-[#ded8ce] bg-white px-3 text-sm outline-none focus:border-[#ef6f61] disabled:opacity-60"
+          />
+          <Button type="button" onClick={submitInvite} disabled={!canManage || pending || !email.trim()} className="h-10 bg-[#ef4d3f] text-white hover:bg-[#df4134]">
+            <UserPlus className="mr-2 size-4" />
+            Invite
+          </Button>
+        </div>
+        {!canManage && <p className="text-xs text-[#756d64]">Only the board owner can invite or remove collaborators.</p>}
+      </div>
+
+      <div className="grid gap-2">
+        <h3 className="text-sm font-semibold text-[#171923]">People</h3>
+        {collaborators.length === 0 ? (
+          <div className="rounded-md border border-dashed border-[#d7cec4] bg-[#fffaf1] p-4 text-sm text-[#756d64]">
+            No collaborators yet.
+          </div>
+        ) : (
+          <div className="grid gap-2">
+            {collaborators.map((collaborator) => {
+              const isSelf = collaborator.userId === currentUser.id
+              return (
+                <div key={collaborator.id} className="flex items-center justify-between gap-3 rounded-md border border-[#ead8bf] bg-[#fffaf1] px-3 py-2">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <span
+                      className="grid size-8 shrink-0 place-items-center rounded-full text-[0.68rem] font-semibold text-white"
+                      style={{ backgroundColor: collaborator.isOwner ? "#2b2824" : "#10a37f" }}
+                    >
+                      {initials(collaborator.name || collaborator.email)}
+                    </span>
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold text-[#2b2824]">
+                        {collaborator.name || collaborator.email}
+                        {isSelf ? " (you)" : ""}
+                      </p>
+                      <p className="text-xs text-[#756d64]">
+                        {collaborator.email} - {collaborator.isOwner ? "Owner" : collaborator.status === "active" ? "Active" : "Pending"}
+                      </p>
+                    </div>
+                  </div>
+                  {!collaborator.isOwner && canManage && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => onRemove(collaborator.id)}
+                      disabled={pending}
+                      className="h-8 border-[#ded8ce] bg-white text-[#b84236] hover:bg-[#fff0ed]"
+                    >
+                      Remove
+                    </Button>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    </BaseDialog>
   )
 }
 
